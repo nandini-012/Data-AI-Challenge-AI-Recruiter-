@@ -1,0 +1,8 @@
+.env
+submission.csv
+backend/data/
+__pycache__/
+*.pyc
+*.pyo
+*/__pycache__/
+**/__pycache__/ 
