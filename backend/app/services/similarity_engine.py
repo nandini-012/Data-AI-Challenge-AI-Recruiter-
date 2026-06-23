@@ -1,188 +1,63 @@
-from datetime import datetime, date
+from app.services.skill_extractor import extract_jd_keywords
 
-# Companies the JD explicitly says NOT to hire from
-# if that is their ONLY experience
-SERVICES_COMPANIES = {
-    "tcs", "infosys", "wipro", "accenture",
-    "cognizant", "capgemini", "hexaware",
-    "mindtree", "mphasis", "tech mahindra"
-}
+RELEVANT_SKILLS, PRODUCTION_TERMS, STRONG_TITLES, MEDIUM_TITLES = extract_jd_keywords()
 
-def get_skill_score(candidate: dict, required_skills: set, bonus_skills: set) -> float:
+
+def title_relevance_score(title: str) -> float:
+    title_l = (title or "").lower()
+    if any(k in title_l for k in STRONG_TITLES):
+        return 1.0
+    if any(k in title_l for k in MEDIUM_TITLES):
+        return 0.7
+    return 0.2
+
+
+def skill_match_score(skills: list) -> float:
     """
-    Score based on skills matched with JD.
-    Checks skill name, proficiency level, and duration used.
+    Weighted by duration_months + endorsements.
+    Kills keyword-stuffer profiles.
     """
-    score = 0.0
-    skills = candidate.get("skills", [])
-
-    for skill in skills:
-        name = skill.get("name", "").lower()
-        proficiency = skill.get("proficiency", "beginner")
-        duration = skill.get("duration_months", 0)
-        endorsements = skill.get("endorsements", 0)
-
-        if name in required_skills:
-            # Base points for matching required skill
-            score += 10
-
-            # More points for higher proficiency
-            if proficiency == "advanced":
-                score += 5
-            elif proficiency == "intermediate":
-                score += 3
-
-            # More points for longer use
-            if duration >= 24:
-                score += 3
-            elif duration >= 12:
-                score += 1
-
-            # More points if others endorsed this skill
-            if endorsements >= 20:
-                score += 2
-
-        elif name in bonus_skills:
-            score += 2
-
-    return score
+    score = 0
+    for s in skills:
+        name_l = (s.get("name") or "").lower()
+        if any(r in name_l for r in RELEVANT_SKILLS):
+            weight = min((s.get("duration_months", 0) or 0) / 24, 1.0)
+            endorsement_boost = min((s.get("endorsements", 0) or 0) / 20, 0.3)
+            score += weight + endorsement_boost
+    return min(score / 6, 1.0)
 
 
-def get_experience_score(candidate: dict) -> float:
+def career_substance_score(career_history: list) -> float:
     """
-    Score based on years of experience and type of companies worked at.
-    JD wants 5-9 years at product companies, not consulting firms.
+    Looks for production/deployment language in career descriptions.
     """
-    score = 0.0
-    profile = candidate.get("profile", {})
-    years = profile.get("years_of_experience", 0)
+    text = " ".join(
+        j.get("description", "") for j in career_history
+    ).lower()
+    hits = sum(1 for t in PRODUCTION_TERMS if t in text)
+    return min(hits / 5, 1.0)
 
-    # JD wants 5-9 years
+
+def experience_fit_score(years: float) -> float:
+    """JD targets 5-9 years."""
     if 5 <= years <= 9:
-        score += 20
-    elif 4 <= years < 5:
-        score += 15
-    elif 9 < years <= 12:
-        score += 10
-    elif years < 4:
-        score += 0
-
-    # Check career history for product company experience
-    career = candidate.get("career_history", [])
-    only_services = True
-
-    for job in career:
-        company = job.get("company", "").lower()
-        industry = job.get("industry", "").lower()
-        duration = job.get("duration_months", 0)
-
-        is_services = any(s in company for s in SERVICES_COMPANIES)
-
-        if not is_services:
-            only_services = False
-            # Reward product company experience
-            if duration >= 24:
-                score += 8
-            elif duration >= 12:
-                score += 4
-
-        # Check job description text for AI/ML work
-        desc = job.get("description", "").lower()
-        ai_keywords = [
-            "embedding", "vector", "retrieval", "ranking",
-            "recommendation", "search", "nlp", "llm",
-            "machine learning", "ml model", "rag"
-        ]
-        for kw in ai_keywords:
-            if kw in desc:
-                score += 2
-                break  # only count once per job
-
-    # JD explicitly penalises those ONLY from services companies
-    if only_services:
-        score -= 15
-
-    return score
+        return 1.0
+    elif 3 <= years < 5 or 9 < years <= 12:
+        return 0.6
+    else:
+        return 0.3
 
 
-def get_availability_score(candidate: dict) -> float:
-    """
-    Score based on redrob behavioral signals.
-    A perfect-on-paper candidate who is inactive is not actually hireable.
-    """
-    score = 0.0
-    signals = candidate.get("redrob_signals", {})
-
-    # Is the candidate actively looking?
-    if signals.get("open_to_work_flag") is True:
-        score += 15
-
-    # How recently were they active on the platform?
-    last_active = signals.get("last_active_date", "")
-    if last_active:
-        try:
-            last_date = datetime.fromisoformat(last_active).date()
-            today = date(2026, 6, 21)  # current date
-            days_inactive = (today - last_date).days
-            if days_inactive <= 30:
-                score += 15
-            elif days_inactive <= 60:
-                score += 10
-            elif days_inactive <= 90:
-                score += 5
-            elif days_inactive > 180:
-                score -= 10  # inactive for 6+ months = bad
-        except Exception:
-            pass
-
-    # Recruiter response rate — how often do they reply?
-    response_rate = signals.get("recruiter_response_rate", -1)
-    if response_rate >= 0:
-        score += response_rate * 15
-
-    # Notice period — JD prefers under 30 days
-    notice = signals.get("notice_period_days", 999)
-    if notice <= 30:
-        score += 10
-    elif notice <= 60:
-        score += 5
-    elif notice > 90:
-        score -= 5
-
-    # Profile completeness
-    completeness = signals.get("profile_completeness_score", 0)
-    score += (completeness / 100) * 5
-
-    # Interview completion rate
-    interview_rate = signals.get("interview_completion_rate", -1)
-    if interview_rate >= 0:
-        score += interview_rate * 5
-
-    return score
-
-
-def get_location_score(candidate: dict) -> float:
-    """
-    JD prefers candidates in India, specifically Pune/Noida/Delhi NCR/Mumbai/Hyderabad.
-    """
-    score = 0.0
-    profile = candidate.get("profile", {})
-    country = profile.get("country", "").lower()
-    location = profile.get("location", "").lower()
-
-    preferred_cities = {
-        "pune", "noida", "delhi", "mumbai",
-        "hyderabad", "bangalore", "bengaluru"
-    }
-
-    if country == "india":
-        score += 10
-        if any(city in location for city in preferred_cities):
-            score += 5
-
-    # Willing to relocate helps
-    signals = candidate.get("redrob_signals", {})
-    if signals.get("willing_to_relocate") is True:
-        score += 3
-
-    return score 
+def behavioral_multiplier(signals: dict, days_since_active: int) -> float:
+    """Used as multiplier on base score — not additive."""
+    mult = 1.0
+    if days_since_active > 180:
+        mult *= 0.6
+    elif days_since_active > 90:
+        mult *= 0.85
+    mult *= (0.7 + 0.5 * (signals.get("recruiter_response_rate") or 0))
+    if signals.get("interview_completion_rate", 1) < 0.5:
+        mult *= 0.9
+    if signals.get("open_to_work_flag"):
+        mult *= 1.05
+    return round(mult, 3)

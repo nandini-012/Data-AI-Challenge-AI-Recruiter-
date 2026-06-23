@@ -3,9 +3,9 @@ AI system that ranks candidates the way a great recruiter would — not by match
 
 ## Setup Instructions
 
-### 1. Clone the repo
+### 1. Clone the repo 
 ```bash
-git clone https://github.com/jiya2401/Data-AI-Challenge-AI-Recruiter-.git
+git clone https://github.com/YOUR_USERNAME/Data-AI-Challenge-AI-Recruiter-.git
 cd Data-AI-Challenge-AI-Recruiter-
 ```
 

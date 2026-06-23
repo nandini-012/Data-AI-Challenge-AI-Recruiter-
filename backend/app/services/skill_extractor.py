@@ -1,24 +1,28 @@
-# These are the exact skills the JD asks for
-JD_REQUIRED_SKILLS = {
-    "embeddings", "vector", "retrieval", "ranking",
-    "nlp", "llm", "fine-tuning", "faiss", "pinecone",
-    "qdrant", "weaviate", "elasticsearch", "python",
-    "rag", "sentence-transformers", "search",
-    "recommendation", "milvus", "openai", "bge",
-    "lora", "qlora", "peft", "xgboost", "bert",
-    "transformers", "pytorch", "huggingface"
-}
+# Relevant skills weighted by duration and endorsements
+RELEVANT_SKILLS = [
+    "python", "pytorch", "tensorflow", "machine learning",
+    "deep learning", "nlp", "llm", "transformers",
+    "computer vision", "mlops", "sql", "spark",
+    "embeddings", "faiss", "vector search",
+    "fine-tuning llms", "sentence transformers",
+    "elasticsearch", "information retrieval",
+    "recommendation systems", "hugging face transformers",
+    "lora", "opensearch", "milvus", "langchain"
+]
 
-# Skills that are nice to have but not must-have
-JD_BONUS_SKILLS = {
-    "aws", "gcp", "azure", "docker", "kubernetes",
-    "mlflow", "wandb", "weights & biases", "fastapi",
-    "flask", "spark", "kafka", "airflow"
-}
+PRODUCTION_TERMS = [
+    "deployed", "production", "shipped", "scaled", "users",
+    "latency", "throughput", "pipeline", "infrastructure", "launched"
+]
 
-def extract_jd_keywords() -> tuple:
-    """
-    Returns required and bonus skill sets from the JD.
-    No need to parse text — we know the JD already.
-    """
-    return JD_REQUIRED_SKILLS, JD_BONUS_SKILLS 
+STRONG_TITLES = [
+    "ai engineer", "ml engineer", "machine learning engineer",
+    "research scientist", "applied scientist"
+]
+
+MEDIUM_TITLES = [
+    "data scientist", "ai", "ml", "machine learning"
+]
+
+def extract_jd_keywords():
+    return RELEVANT_SKILLS, PRODUCTION_TERMS, STRONG_TITLES, MEDIUM_TITLES

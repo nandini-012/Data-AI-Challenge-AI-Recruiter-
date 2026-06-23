@@ -1,130 +1,164 @@
-from app.services.skill_extractor import extract_jd_keywords
+from datetime import date
 from app.services.similarity_engine import (
-    get_skill_score,
-    get_experience_score,
-    get_availability_score,
-    get_location_score
+    title_relevance_score,
+    skill_match_score,
+    career_substance_score,
+    experience_fit_score,
+    behavioral_multiplier
 )
+from app.services.skill_extractor import RELEVANT_SKILLS
+
 
 def is_honeypot(candidate: dict) -> bool:
     """
-    Detect impossible/fake profiles. The dataset has ~80 honeypots.
-    If we rank them in top 100 we get disqualified.
+    5 checks exactly matching Ravi's validated pipeline.
     """
-    career = candidate.get("career_history", [])
-    for job in career:
-        start = job.get("start_date", "")
-        duration = job.get("duration_months", 0)
-        # Check: does claimed duration match dates?
-        if start and duration:
-            try:
-                from datetime import datetime
-                start_date = datetime.fromisoformat(start)
-                implied_end_months = duration
-                # If duration > 120 months (10 years) at one company — suspicious
-                if implied_end_months > 120:
-                    return True
-            except Exception:
-                pass
-
-    # Check for expert in too many skills with 0 months experience
-    skills = candidate.get("skills", [])
-    expert_zero_duration = sum(
-        1 for s in skills
-        if s.get("proficiency") == "advanced" and s.get("duration_months", 0) == 0
-    )
-    if expert_zero_duration >= 5:
-        return True
-
-    return False
-
-
-def build_reasoning(candidate: dict, score: float, required_skills: set) -> str:
-    """
-    Build a 1-2 sentence reasoning for the submission CSV.
-    Must be specific to each candidate — generic reasoning gets penalised.
-    """
+    cid = candidate["candidate_id"]
     profile = candidate.get("profile", {})
-    name = profile.get("anonymized_name", "Candidate")
-    years = profile.get("years_of_experience", 0)
-    title = profile.get("current_title", "")
-    company = profile.get("current_company", "")
-    location = profile.get("location", "")
-
-    # Find matched skills
+    exp_months = (profile.get("years_of_experience", 0) or 0) * 12
     skills = candidate.get("skills", [])
-    matched = [
-        s["name"] for s in skills
-        if s["name"].lower() in required_skills
+    career = candidate.get("career_history", [])
+    education = candidate.get("education", [])
+
+    flags = 0
+
+    # 1. Skill duration exceeds total experience
+    for s in skills:
+        dm = s.get("duration_months", 0) or 0
+        if dm > exp_months + 24:
+            flags += 1
+            break
+
+    # 2. Expert proficiency with near-zero duration
+    for s in skills:
+        if s.get("proficiency") == "expert" and (s.get("duration_months", 0) or 0) <= 2:
+            flags += 1
+            break
+
+    # 3. Career months mismatch vs years of experience
+    career_months = sum(j.get("duration_months", 0) or 0 for j in career)
+    if abs(career_months - exp_months) > 48:
+        flags += 1
+
+    # 4. Multiple simultaneous current jobs
+    current_jobs = [j for j in career if j.get("is_current")]
+    if len(current_jobs) > 1:
+        flags += 1
+
+    # 5. Education end_year before start_year
+    for e in education:
+        if e.get("end_year") and e.get("start_year") and e["end_year"] < e["start_year"]:
+            flags += 1
+            break
+
+    return flags >= 2
+
+
+def get_days_since_active(signals: dict) -> int:
+    last_active = signals.get("last_active_date", "")
+    if not last_active:
+        return 999
+    try:
+        from datetime import datetime
+        last_date = datetime.fromisoformat(last_active).date()
+        today = date.today()
+        return (today - last_date).days
+    except Exception:
+        return 999
+
+
+def build_reasoning(candidate: dict, title_score: float,
+                    career_score: float, days_inactive: int) -> str:
+    profile = candidate.get("profile", {})
+    title = profile.get("current_title", "")
+    years = profile.get("years_of_experience", 0)
+    skills = candidate.get("skills", [])
+
+    # Title fit
+    if title_score >= 1.0:
+        parts = [f"currently {title}, a direct match for the target role"]
+    elif title_score >= 0.7:
+        parts = [f"currently {title}, an adjacent AI/ML role"]
+    else:
+        parts = [f"currently {title}, transitioning toward AI/ML based on skills"]
+
+    # Top 2 relevant skills with longest duration
+    rel_skills = [
+        s for s in skills
+        if any(r in (s.get("name") or "").lower() for r in RELEVANT_SKILLS)
     ]
-    matched_str = ", ".join(matched[:3]) if matched else "adjacent skills"
-
-    signals = candidate.get("redrob_signals", {})
-    notice = signals.get("notice_period_days", "unknown")
-    response = signals.get("recruiter_response_rate", 0)
-
-    reasoning = (
-        f"{years}yr {title} at {company} ({location}); "
-        f"matched skills: {matched_str}. "
-        f"Notice: {notice}d, response rate: {int(response*100)}%."
+    rel_skills_sorted = sorted(
+        rel_skills,
+        key=lambda s: s.get("duration_months", 0) or 0,
+        reverse=True
     )
-    return reasoning
+    if rel_skills_sorted:
+        top_names = ", ".join(s["name"] for s in rel_skills_sorted[:2])
+        parts.append(f"strongest skills: {top_names}")
 
+    # Career substance
+    if career_score >= 0.6:
+        parts.append("production/deployment experience evident")
+    elif career_score >= 0.3:
+        parts.append("some production-facing work evident")
 
-def score_candidate(candidate: dict, required_skills: set, bonus_skills: set) -> float:
-    """
-    Final score combining all signals.
-    Weights are tuned based on what the JD actually cares about.
-    """
-    # Hard filter — skip honeypots entirely
-    if is_honeypot(candidate):
-        return -1.0
+    parts.append(f"{years} years of experience")
 
-    skill_score = get_skill_score(candidate, required_skills, bonus_skills)
-    experience_score = get_experience_score(candidate)
-    availability_score = get_availability_score(candidate)
-    location_score = get_location_score(candidate)
+    if days_inactive <= 30:
+        parts.append("recently active on platform")
+    elif days_inactive > 180:
+        parts.append("note: inactive for extended period")
 
-    # Weighted total — skills + experience matter most
-    total = (
-        skill_score * 0.40 +
-        experience_score * 0.30 +
-        availability_score * 0.20 +
-        location_score * 0.10
-    )
-
-    return round(total, 4)
+    return "; ".join(parts) + "."
 
 
 def rank_candidates(candidates: list) -> list:
-    """
-    Score all candidates and return top 100 with rank and reasoning.
-    """
-    required_skills, bonus_skills = extract_jd_keywords()
     scored = []
 
     for candidate in candidates:
-        score = score_candidate(candidate, required_skills, bonus_skills)
-        if score >= 0:  # skip honeypots (score = -1)
-            scored.append({
-                "candidate_id": candidate["candidate_id"],
-                "score": score,
-                "reasoning": build_reasoning(candidate, score, required_skills),
-                "candidate": candidate
-            })
+        if is_honeypot(candidate):
+            continue
 
-    # Sort highest score first
-    scored.sort(key=lambda x: x["score"], reverse=True)
+        profile = candidate.get("profile", {})
+        signals = candidate.get("redrob_signals", {})
+        skills = candidate.get("skills", [])
+        career = candidate.get("career_history", [])
 
-    # Return top 100 with rank assigned
+        title = profile.get("current_title", "")
+        years = profile.get("years_of_experience", 0) or 0
+        days_inactive = get_days_since_active(signals)
+
+        t_score = title_relevance_score(title)
+        s_score = skill_match_score(skills)
+        c_score = career_substance_score(career)
+        e_score = experience_fit_score(years)
+        b_mult = behavioral_multiplier(signals, days_inactive)
+
+        base_score = (
+            0.35 * t_score +
+            0.30 * s_score +
+            0.20 * c_score +
+            0.15 * e_score
+        )
+        final_score = round(base_score * b_mult, 4)
+
+        scored.append({
+            "candidate_id": candidate["candidate_id"],
+            "score": final_score,
+            "reasoning": build_reasoning(candidate, t_score, c_score, days_inactive)
+        })
+
+    # Sort by score desc, candidate_id asc for tie-breaking
+    scored.sort(key=lambda x: (-x["score"], x["candidate_id"]))
+
+    # Assign ranks
     top100 = []
     for rank, item in enumerate(scored[:100], start=1):
         top100.append({
-            "rank": rank,
             "candidate_id": item["candidate_id"],
+            "rank": rank,
             "score": item["score"],
             "reasoning": item["reasoning"]
         })
 
-    return top100
- 
+    return top100 
