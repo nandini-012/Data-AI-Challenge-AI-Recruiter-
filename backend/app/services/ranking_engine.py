@@ -1,4 +1,6 @@
 from datetime import date, datetime
+from functools import lru_cache
+from time import perf_counter
 from app.services.similarity_engine import (
     title_relevance_score,
     skill_match_score,
@@ -309,15 +311,22 @@ def _format_years(years) -> str:
         return "0"
 
 
+@lru_cache(maxsize=4096)
+def _reasoning_skill_metadata(name: str) -> tuple:
+    if not is_relevant_skill(name) and not reasoning_skill_tier(name):
+        return "", ""
+
+    display_name = normalize_reasoning_skill_name(name)
+    tier = reasoning_skill_tier(display_name)
+    return display_name, tier
+
+
 def _selected_reasoning_skills(skills: list) -> tuple:
     tiered_skills = {"differentiator": [], "core": []}
     seen = set()
     for skill in sorted(skills or [], key=lambda s: s.get("duration_months") or 0, reverse=True):
         name = skill.get("name") or ""
-        if not is_relevant_skill(name) and not reasoning_skill_tier(name):
-            continue
-        display_name = normalize_reasoning_skill_name(name)
-        tier = reasoning_skill_tier(display_name)
+        display_name, tier = _reasoning_skill_metadata(name)
         if tier not in tiered_skills or display_name in seen:
             continue
         seen.add(display_name)
@@ -366,13 +375,28 @@ def build_reasoning(candidate, title_score, career_score, days_inactive):
 
 
 def rank_candidates(candidates: list) -> list:
+    total_start = perf_counter()
+    timings = {
+        "honeypot_filtering": 0.0,
+        "feature_extraction": 0.0,
+        "title_scoring": 0.0,
+        "skill_scoring": 0.0,
+        "career_scoring": 0.0,
+        "behavior_scoring": 0.0,
+        "reason_generation": 0.0,
+        "sorting": 0.0,
+    }
     scored = []
 
     for candidate in candidates:
         try:
+            step_start = perf_counter()
             if is_honeypot(candidate):
+                timings["honeypot_filtering"] += perf_counter() - step_start
                 continue
+            timings["honeypot_filtering"] += perf_counter() - step_start
 
+            step_start = perf_counter()
             profile = candidate.get("profile", {}) or {}
             signals = candidate.get("redrob_signals", {}) or {}
             skills = candidate.get("skills", []) or []
@@ -381,13 +405,26 @@ def rank_candidates(candidates: list) -> list:
             title = profile.get("current_title", "") or ""
             years = profile.get("years_of_experience") or 0
             days_inactive = get_days_since_active(signals)
+            timings["feature_extraction"] += perf_counter() - step_start
 
+            step_start = perf_counter()
             title_inconsistency = has_title_experience_inconsistency(title, years)
             t_score = title_relevance_score(title, years)
+            timings["title_scoring"] += perf_counter() - step_start
+
+            step_start = perf_counter()
             s_score = skill_match_score(skills)
+            timings["skill_scoring"] += perf_counter() - step_start
+
+            step_start = perf_counter()
             c_score = career_substance_score(career)
+            timings["career_scoring"] += perf_counter() - step_start
+
             e_score = experience_fit_score(years)
+
+            step_start = perf_counter()
             b_mult = behavioral_multiplier(signals, days_inactive)
+            timings["behavior_scoring"] += perf_counter() - step_start
 
             base_score = (
                 0.35 * t_score +
@@ -399,16 +436,22 @@ def rank_candidates(candidates: list) -> list:
             if title_inconsistency:
                 final_score = round(final_score * 0.97, 4)
 
+            step_start = perf_counter()
+            reasoning = build_reasoning(candidate, t_score, c_score, days_inactive)
+            timings["reason_generation"] += perf_counter() - step_start
+
             scored.append({
                 "candidate_id": candidate.get("candidate_id", "UNKNOWN"),
                 "score": final_score,
-                "reasoning": build_reasoning(candidate, t_score, c_score, days_inactive)
+                "reasoning": reasoning
             })
         except Exception as e:
             # Skip bad records silently
             continue
 
+    step_start = perf_counter()
     scored.sort(key=lambda x: (-x["score"], x["candidate_id"]))
+    timings["sorting"] += perf_counter() - step_start
 
     top100 = []
     for rank, item in enumerate(scored[:100], start=1):
@@ -418,5 +461,17 @@ def rank_candidates(candidates: list) -> list:
             "score": item["score"],
             "reasoning": item["reasoning"]
         })
+
+    total_time = perf_counter() - total_start
+    print("rank_candidates() timing profile:")
+    print(f"  Honeypot filtering: {timings['honeypot_filtering']:.4f}s")
+    print(f"  Feature extraction: {timings['feature_extraction']:.4f}s")
+    print(f"  Title scoring: {timings['title_scoring']:.4f}s")
+    print(f"  Skill scoring: {timings['skill_scoring']:.4f}s")
+    print(f"  Career scoring: {timings['career_scoring']:.4f}s")
+    print(f"  Behavior scoring: {timings['behavior_scoring']:.4f}s")
+    print(f"  Reason generation: {timings['reason_generation']:.4f}s")
+    print(f"  Sorting: {timings['sorting']:.4f}s")
+    print(f"  Total execution time: {total_time:.4f}s")
 
     return top100

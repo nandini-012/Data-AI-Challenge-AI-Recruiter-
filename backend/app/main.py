@@ -10,6 +10,7 @@ load_dotenv()
 
 # Global candidates list
 candidates = []
+candidate_index = {}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -17,13 +18,20 @@ async def lifespan(app: FastAPI):
     Load candidates once at startup.
     Proper FastAPI lifespan pattern.
     """
-    global candidates
+    global candidates, candidate_index
     DATA_PATH = os.getenv("DATA_PATH", "data/candidates.jsonl")
     print(f"Loading candidates from {DATA_PATH} ...")
     candidates = load_candidates(DATA_PATH)
+    candidate_index = {
+        candidate.get("candidate_id"): candidate
+        for candidate in candidates
+        if candidate.get("candidate_id")
+    }
     print(f"Loaded {len(candidates)} candidates successfully!")
+    print(f"Built candidate index with {len(candidate_index)} entries.")
     yield
     candidates.clear()
+    candidate_index.clear()
     print("Server shutdown — candidates cleared.")
 
 

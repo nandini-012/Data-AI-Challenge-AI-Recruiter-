@@ -1,14 +1,20 @@
 """Skill and evidence vocabulary used by the ranking pipeline."""
 
 import re
+from functools import lru_cache
 
 
+_NON_TERM_RE = re.compile(r"[^a-z0-9+#.]+")
+_WHITESPACE_RE = re.compile(r"\s+")
+
+
+@lru_cache(maxsize=4096)
 def _clean_term(value: str) -> str:
     """Normalize punctuation/spacing before taxonomy lookup."""
     value = (value or "").lower()
     value = value.replace("&", " and ")
-    value = re.sub(r"[^a-z0-9+#.]+", " ", value)
-    return re.sub(r"\s+", " ", value).strip()
+    value = _NON_TERM_RE.sub(" ", value)
+    return _WHITESPACE_RE.sub(" ", value).strip()
 
 
 SKILL_TAXONOMY = {
@@ -189,6 +195,14 @@ REASONING_SKILL_ALIASES = {
     "onnx": "ONNX",
 }
 
+REASONING_SKILL_ALIAS_PATTERNS = [
+    (
+        re.compile(r"(?<![a-z0-9])" + re.escape(alias) + r"(?![a-z0-9])"),
+        display_name,
+    )
+    for alias, display_name in REASONING_SKILL_ALIASES.items()
+]
+
 CAREER_EVIDENCE_GROUPS = {
     "build": ["built", "build", "developed", "designed", "implemented", "created"],
     "deployment": [
@@ -255,25 +269,28 @@ MEDIUM_TITLES = [
 ]
 
 
+@lru_cache(maxsize=4096)
 def normalize_skill_name(skill_name: str) -> str:
     """Return a canonical skill name when the skill is in the taxonomy."""
     cleaned = _clean_term(skill_name)
     return SKILL_ALIASES.get(cleaned, skill_name or "")
 
 
+@lru_cache(maxsize=4096)
 def is_relevant_skill(skill_name: str) -> bool:
     """Use normalized exact matching instead of broad substring matching."""
     return normalize_skill_name(skill_name) in RELEVANT_SKILL_SET
 
 
+@lru_cache(maxsize=4096)
 def normalize_reasoning_skill_name(skill_name: str) -> str:
     """Return the recruiter-facing skill name used only in explanations."""
     cleaned = _clean_term(skill_name)
     if cleaned in REASONING_SKILL_ALIASES:
         return REASONING_SKILL_ALIASES[cleaned]
 
-    for alias, display_name in REASONING_SKILL_ALIASES.items():
-        if re.search(r"(?<![a-z0-9])" + re.escape(alias) + r"(?![a-z0-9])", cleaned):
+    for pattern, display_name in REASONING_SKILL_ALIAS_PATTERNS:
+        if pattern.search(cleaned):
             return display_name
 
     canonical = normalize_skill_name(skill_name)
@@ -282,6 +299,7 @@ def normalize_reasoning_skill_name(skill_name: str) -> str:
     return canonical
 
 
+@lru_cache(maxsize=4096)
 def reasoning_skill_tier(skill_name: str) -> str:
     """Classify a skill for explanation selection without affecting ranking."""
     display_name = normalize_reasoning_skill_name(skill_name)

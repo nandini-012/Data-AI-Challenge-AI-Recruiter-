@@ -9,6 +9,9 @@ from app.services.skill_extractor import (
 
 RELEVANT_SKILLS, PRODUCTION_TERMS, STRONG_TITLES, MEDIUM_TITLES = extract_jd_keywords()
 
+_CAREER_TEXT_CLEAN_RE = re.compile(r"[^a-z0-9+#.]+")
+_CAREER_BOUNDARY_TEXT_RE = re.compile(r"[^a-z0-9]+")
+
 CAREER_EVIDENCE_PATTERNS = {
     group: [
         re.compile(r"(?<![a-z0-9])" + re.escape(term.lower()) + r"(?![a-z0-9])")
@@ -17,11 +20,31 @@ CAREER_EVIDENCE_PATTERNS = {
     for group, terms in CAREER_EVIDENCE_GROUPS.items()
 }
 
+CAREER_EVIDENCE_GROUP_TERMS = {
+    group: tuple(term.lower() for term in terms)
+    for group, terms in CAREER_EVIDENCE_GROUPS.items()
+}
+
 ALL_CAREER_EVIDENCE_PATTERNS = [
     pattern
     for patterns in CAREER_EVIDENCE_PATTERNS.values()
     for pattern in patterns
 ]
+
+ALL_CAREER_EVIDENCE_TERMS = tuple(
+    term.lower()
+    for terms in CAREER_EVIDENCE_GROUPS.values()
+    for term in terms
+)
+
+CAREER_EVIDENCE_WEIGHTS = {
+    "build": 0.16,
+    "deployment": 0.25,
+    "scale": 0.16,
+    "operations": 0.18,
+    "data_pipeline": 0.16,
+    "ai_systems": 0.24,
+}
 
 
 JUNIOR_TITLE_TERMS = ("junior", "jr", "associate")
@@ -80,42 +103,41 @@ def _has_evidence(text: str, pattern) -> bool:
     return pattern.search(text) is not None
 
 
+def _clean_career_text(value: str) -> str:
+    return _CAREER_TEXT_CLEAN_RE.sub(" ", (value or "").lower())
+
+
+def _career_match_text(value: str) -> str:
+    return " " + _CAREER_BOUNDARY_TEXT_RE.sub(" ", value) + " "
+
+
+def _has_career_term(text: str, terms: tuple) -> bool:
+    return any(f" {term} " in text for term in terms)
+
+
 def career_substance_score(career_history: list) -> float:
     """
     Scores diverse engineering evidence, not repeated keyword occurrences.
     """
-    text = " ".join(j.get("description", "") for j in career_history).lower()
-    text = re.sub(r"[^a-z0-9+#.]+", " ", text)
-
-    evidence_weights = {
-        "build": 0.16,
-        "deployment": 0.25,
-        "scale": 0.16,
-        "operations": 0.18,
-        "data_pipeline": 0.16,
-        "ai_systems": 0.24,
-    }
+    job_texts = [
+        _clean_career_text(job.get("description", ""))
+        for job in career_history
+    ]
+    job_match_texts = [_career_match_text(job_text) for job_text in job_texts]
+    text = " ".join(job_match_texts)
 
     matched_groups = {
         group
-        for group, patterns in CAREER_EVIDENCE_PATTERNS.items()
-        if any(_has_evidence(text, pattern) for pattern in patterns)
+        for group, terms in CAREER_EVIDENCE_GROUP_TERMS.items()
+        if _has_career_term(text, terms)
     }
 
-    score = sum(evidence_weights[group] for group in matched_groups)
+    score = sum(CAREER_EVIDENCE_WEIGHTS[group] for group in matched_groups)
 
     # Small quality bonus when evidence appears across multiple roles.
     jobs_with_evidence = 0
-    for job in career_history:
-        job_text = re.sub(
-            r"[^a-z0-9+#.]+",
-            " ",
-            (job.get("description", "") or "").lower(),
-        )
-        if any(
-            _has_evidence(job_text, pattern)
-            for pattern in ALL_CAREER_EVIDENCE_PATTERNS
-        ):
+    for job_text in job_match_texts:
+        if _has_career_term(job_text, ALL_CAREER_EVIDENCE_TERMS):
             jobs_with_evidence += 1
 
     score += min(jobs_with_evidence, 3) * 0.03
