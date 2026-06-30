@@ -5,10 +5,14 @@ from app.services.similarity_engine import (
     title_relevance_score,
     skill_match_score,
     career_substance_score,
+    career_substance_score_jd,
     experience_fit_score,
     behavioral_multiplier,
     has_junior_or_associate_title,
-    has_title_experience_inconsistency
+    has_title_experience_inconsistency,
+    score_and_match_skills_jd,
+    title_relevance_score_jd,
+    experience_fit_score_jd,
 )
 from app.services.skill_extractor import (
     is_relevant_skill,
@@ -374,7 +378,7 @@ def build_reasoning(candidate, title_score, career_score, days_inactive):
         return f"Candidate profile processed. Score reflects technical and career signals."
 
 
-def rank_candidates(candidates: list) -> list:
+def rank_candidates(candidates: list, jd_context=None) -> list:
     total_start = perf_counter()
     timings = {
         "honeypot_filtering": 0.0,
@@ -409,23 +413,23 @@ def rank_candidates(candidates: list) -> list:
 
             step_start = perf_counter()
             title_inconsistency = has_title_experience_inconsistency(title, years)
-            t_score = title_relevance_score(title, years)
+            t_score = title_relevance_score_jd(title, years, jd_context)
             timings["title_scoring"] += perf_counter() - step_start
 
             step_start = perf_counter()
-            s_score = skill_match_score(skills)
+            s_score, matched_skills = score_and_match_skills_jd(skills, jd_context)
             timings["skill_scoring"] += perf_counter() - step_start
 
             step_start = perf_counter()
-            c_score = career_substance_score(career)
+            c_score = career_substance_score_jd(career, jd_context)
             timings["career_scoring"] += perf_counter() - step_start
 
-            e_score = experience_fit_score(years)
+            e_score = experience_fit_score_jd(years, jd_context)
 
             step_start = perf_counter()
             b_mult = behavioral_multiplier(signals, days_inactive)
             timings["behavior_scoring"] += perf_counter() - step_start
-
+            
             base_score = (
                 0.35 * t_score +
                 0.30 * s_score +
@@ -436,33 +440,72 @@ def rank_candidates(candidates: list) -> list:
             if title_inconsistency:
                 final_score = round(final_score * 0.97, 4)
 
-            step_start = perf_counter()
-            reasoning = build_reasoning(candidate, t_score, c_score, days_inactive)
-            timings["reason_generation"] += perf_counter() - step_start
-
+           
             scored.append({
                 "candidate_id": candidate.get("candidate_id", "UNKNOWN"),
                 "score": final_score,
-                "reasoning": reasoning
-            })
+                "reasoning": None,
+                "_candidate": candidate,
+                "_t_score": t_score,
+                "_s_score": s_score,
+                "_c_score": c_score,
+                "_e_score": e_score,
+                "_days_inactive": days_inactive,
+                "_matched_skills": matched_skills,
+})
+            
         except Exception as e:
-            # Skip bad records silently
-            continue
-
+            print(
+                "Candidate failed:",
+                candidate.get("candidate_id"),
+                type(e).__name__,
+                str(e)
+    )
+        continue
     step_start = perf_counter()
     scored.sort(key=lambda x: (-x["score"], x["candidate_id"]))
     timings["sorting"] += perf_counter() - step_start
 
+     
     top100 = []
+
+    reason_start = perf_counter()
+
     for rank, item in enumerate(scored[:100], start=1):
+        reasoning = build_reasoning(
+            item["_candidate"],
+            item["_t_score"],
+            item["_c_score"],
+            item["_days_inactive"],
+    )
+
         top100.append({
             "candidate_id": item["candidate_id"],
             "rank": rank,
             "score": item["score"],
-            "reasoning": item["reasoning"]
-        })
+            "reasoning": reasoning,
+    })
 
+    timings["reason_generation"] = perf_counter() - reason_start
     total_time = perf_counter() - total_start
+
+    if jd_context is not None:
+        print("JD debug context:")
+        print(f"  Parsed JD skills: {', '.join(jd_context.get('debug_skills', [])) or '(none)'}")
+        print("  First five ranked candidates:")
+        for item in scored[:5]:
+            profile = item["_candidate"].get("profile", {}) or {}
+            print(
+                "   "
+                f"{item['candidate_id']} | "
+                f"title={profile.get('current_title', '')!r} | "
+                f"matched_skills={item['_matched_skills']} | "
+                f"title_score={item['_t_score']:.3f} | "
+                f"skill_score={item['_s_score']:.3f} | "
+                f"career_score={item['_c_score']:.3f} | "
+                f"final_score={item['score']:.4f}"
+            )
+
     print("rank_candidates() timing profile:")
     print(f"  Honeypot filtering: {timings['honeypot_filtering']:.4f}s")
     print(f"  Feature extraction: {timings['feature_extraction']:.4f}s")

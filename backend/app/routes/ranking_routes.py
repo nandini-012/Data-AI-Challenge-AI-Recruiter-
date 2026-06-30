@@ -2,11 +2,13 @@ import csv
 import hashlib
 import io
 import json
+import time
 from collections import Counter
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from app.routes.jd_routes import get_jd
 from app.services.ranking_engine import rank_candidates
+from app.services.skill_extractor import parse_jd_context
 
 router = APIRouter()
 
@@ -36,22 +38,38 @@ def _jd_hash(jd=None):
 
 
 def _get_rank_bundle(candidates, jd=None):
-    """Return a cached ranking bundle keyed by the current JD hash."""
     cache_key = _jd_hash(jd)
     cached = _rank_cache.get(cache_key)
 
-    if cached is None or cached["source_size"] != len(candidates):
-        print(f"Generating ranking cache for JD {cache_key[:12]}...")
-        ranked = rank_candidates(candidates)
-        cached = {
-            "source_size": len(candidates),
-            "ranked": ranked,
-            "ranked_by_id": {
-                item["candidate_id"]: item for item in ranked
-            },
-        }
-        _rank_cache[cache_key] = cached
-        print(f"Ranking cache generated for JD {cache_key[:12]}.")
+    if cached is not None and cached["source_size"] == len(candidates):
+        print(f"Cache hit ({cache_key[:8]})")
+        return cached
+
+    print(f"\nGenerating ranking for {len(candidates):,} candidates")
+
+    total = time.time()
+
+    t = time.time()
+    jd_payload = _normalize_jd(jd)
+    jd_context = parse_jd_context(jd_payload)
+    print(f"JD parsing: {time.time()-t:.2f}s")
+
+    rank_start = time.time()
+    ranked = rank_candidates(candidates, jd_context)
+    print(f"Ranking: {time.time()-rank_start:.2f}s")
+
+    cached = {
+        "source_size": len(candidates),
+        "ranked": ranked,
+        "ranked_by_id": {
+            item["candidate_id"]: item
+            for item in ranked
+        },
+    }
+
+    _rank_cache[cache_key] = cached
+
+    print(f"TOTAL: {time.time()-total:.2f}s\n")
 
     return cached
 
